@@ -16,9 +16,11 @@
 --   (invert N K (C...) J (CASE...))      case analysis on how a
 --                                        hypothesis was derived
 --
--- Inversion is sound because derivability is the least set closed under
--- the rules: a derivable judgment is the conclusion of some rule instance
--- with derivable premises. Each case is taken at a most general unifier of
+-- Inversion is sound because what holds in a model is the conclusion of
+-- some rule instance whose premises hold (for derivability, the least
+-- model, by the last step of a derivation). `ImplicationsIn` proves each
+-- form sound in any model (`Rules.Model`), `Implications` in
+-- derivability. Each case is taken at a most general unifier of
 -- the hypothesis and the rule's conclusion; this file assumes the
 -- unifier's defining properties (`IsMGU`, `NoUnifier`), and Unify.agda proves
 -- that the checker's unification algorithm provides them.
@@ -32,9 +34,11 @@ open import Schematic
 open Rule
 open Σ
 
-module Implications (Sg : Signature) (R : List Rule) where
+-- Sound in the model M; `Implications` below is derivability.
+module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
   open Signature Sg
-  open Calculus Sg R
+  open CalculusIn Sg R M
+  open Model M
 
   ----------------------------------------------------------------------
   -- Rule hypotheses and their semantics
@@ -61,20 +65,20 @@ module Implications (Sg : Signature) (R : List Rule) where
   -- off the generalized variables derives the conclusion from the premises.
   Sat : Subst → RHyp → Set
   Sat γ h = ∀ δ → (∀ x → ¬ (x ∈ gen h) → δ x ≡ γ x) → GW δ (OccH h)
-          → All (λ p → Der (sub δ p)) (rprem h) → Der (sub δ (rconcl h))
+          → All (λ p → Holds (sub δ p)) (rprem h) → Holds (sub δ (rconcl h))
 
   VarsR : List RHyp → Tm → ℕ → Set
   VarsR H J x = Occ x J ⊎ Any (λ h → Fixed h x) H
 
   ValidR : List RHyp → Tm → Set
-  ValidR H J = ∀ γ → GW γ (VarsR H J) → All (Sat γ) H → Der (sub γ J)
+  ValidR H J = ∀ γ → GW γ (VarsR H J) → All (Sat γ) H → Holds (sub γ J)
 
   -- A plain hypothesis is satisfied when its judgment is derivable.
-  sat-plain : (γ : Subst) (j : Tm) → GW γ (λ x → Occ x j) → Der (sub γ j) → Sat γ (plainR j)
+  sat-plain : (γ : Subst) (j : Tm) → GW γ (λ x → Occ x j) → Holds (sub γ j) → Sat γ (plainR j)
   sat-plain γ j gw d δ agree gwδ [] =
-    transport Der (sub-ext γ δ j (λ x _ → sym (agree x (λ ())))) d
+    transport Holds (sub-ext γ δ j (λ x _ → sym (agree x (λ ())))) d
 
-  plain-sat : (γ : Subst) (j : Tm) → GW γ (λ x → Occ x j) → Sat γ (plainR j) → Der (sub γ j)
+  plain-sat : (γ : Subst) (j : Tm) → GW γ (λ x → Occ x j) → Sat γ (plainR j) → Holds (sub γ j)
   plain-sat γ j gw s = s γ (λ x _ → refl) (λ { x (inl o) → gw x o ; x (inr ()) }) []
 
   ----------------------------------------------------------------------
@@ -110,7 +114,7 @@ module Implications (Sg : Signature) (R : List Rule) where
   -- Premises hold at γ when their variables are among the fact's.
   premisesR : {θ γ : Subst} {ps : List Tm} {H : List RHyp} {V : ℕ → Set} → PremsR θ ps H
             → (∀ x → Occs x (subs θ ps) → V x) → GW γ V → (∀ x → Any (λ h → Fixed h x) H → V x)
-            → All (Sat γ) H → All (λ p → Der (sub γ (sub θ p))) ps
+            → All (Sat γ) H → All (λ p → Holds (sub γ (sub θ p))) ps
   premisesR [] side gw hv hs = []
   premisesR {θ} {γ} {p ∷ ps} (_∷_ {H = H} {H′} v rest) side gw hv hs with all-++ H hs
   ... | hs₁ , hs₂ =
@@ -127,8 +131,8 @@ module Implications (Sg : Signature) (R : List Rule) where
               → (∀ x → Occs x (subs θ (prem r)) → VarsR H (sub θ (concl r)) x)
               → ValidR H (sub θ (concl r))
   step-validR {r} r∈R θ wθ {H} ps side γ gw hs =
-    transport Der (sym (sub-comp γ θ (concl r)))
-      (by r∈R (γ ∘ˢ θ) ok (all-comp (premisesR ps side gw (λ x a → inr a) hs)))
+    transport Holds (sym (sub-comp γ θ (concl r)))
+      (closure r∈R (γ ∘ˢ θ) ok (all-comp (premisesR ps side gw (λ x a → inr a) hs)))
     where
       allowed : ∀ y → OccR y r → ∀ x → Occ x (θ y) → VarsR H (sub θ (concl r)) x
       allowed y (inl o) x ox = side x (subs-occ θ (prem r) o ox)
@@ -138,9 +142,9 @@ module Implications (Sg : Signature) (R : List Rule) where
       ok y o = ground-sub γ (θ y) (λ x ox → fst (gw x (allowed y o x ox)))
              , ws-sub γ (wθ y o) (λ x ox → snd (gw x (allowed y o x ox)))
 
-      all-comp : {ps : List Tm} → All (λ p → Der (sub γ (sub θ p))) ps → All (λ p → Der (sub (γ ∘ˢ θ) p)) ps
+      all-comp : {ps : List Tm} → All (λ p → Holds (sub γ (sub θ p))) ps → All (λ p → Holds (sub (γ ∘ˢ θ) p)) ps
       all-comp []       = []
-      all-comp {p ∷ ps} (d ∷ ds) = transport Der (sub-comp γ θ p) d ∷ all-comp ds
+      all-comp {p ∷ ps} (d ∷ ds) = transport Holds (sub-comp γ θ p) d ∷ all-comp ds
 
   -- (apply N M BIND REF...) with M a rule hypothesis h: σ instantiates
   -- only h's generalized variables.
@@ -151,7 +155,7 @@ module Implications (Sg : Signature) (R : List Rule) where
                        → VarsR (h ∷ H) (sub σ (rconcl h)) x)
                   → ValidR (h ∷ H) (sub σ (rconcl h))
   apply-hyp-valid h σ off wσ {H} ps side γ gw (sh ∷ hs) =
-    transport Der (sym (sub-comp γ σ (rconcl h))) (sh (γ ∘ˢ σ) agree gwδ prems)
+    transport Holds (sym (sub-comp γ σ (rconcl h))) (sh (γ ∘ˢ σ) agree gwδ prems)
     where
       agree : ∀ x → ¬ (x ∈ gen h) → (γ ∘ˢ σ) x ≡ γ x
       agree x n = cong (sub γ) (off x n)
@@ -166,15 +170,15 @@ module Implications (Sg : Signature) (R : List Rule) where
             , ws-sub γ (wσ x m o) (λ y oy → snd (gw y (side y (inr (x , m , o , oy)))))
       ... | no n = transport (λ t → GroundWS t (vs x)) (sym (agree x n)) (gw x (fixed-in x o n))
 
-      prems : All (λ p → Der (sub (γ ∘ˢ σ) p)) (rprem h)
+      prems : All (λ p → Holds (sub (γ ∘ˢ σ) p)) (rprem h)
       prems = all-comp (premisesR ps (λ x o → side x (inl o)) gw (λ x a → hv x a) hs)
         where
           hv : ∀ x → Any (λ h′ → Fixed h′ x) H → VarsR (h ∷ H) (sub σ (rconcl h)) x
           hv x a = inr (there a)
 
-          all-comp : {ps : List Tm} → All (λ p → Der (sub γ (sub σ p))) ps → All (λ p → Der (sub (γ ∘ˢ σ) p)) ps
+          all-comp : {ps : List Tm} → All (λ p → Holds (sub γ (sub σ p))) ps → All (λ p → Holds (sub (γ ∘ˢ σ) p)) ps
           all-comp []       = []
-          all-comp {p ∷ ps} (d ∷ ds) = transport Der (sub-comp γ σ p) d ∷ all-comp ds
+          all-comp {p ∷ ps} (d ∷ ds) = transport Holds (sub-comp γ σ p) d ∷ all-comp ds
 
   -- (apply N M BIND REF...) with M an implication proved earlier, whose
   -- hypotheses are plain: an instance of it, with its hypotheses proved.
@@ -185,7 +189,7 @@ module Implications (Sg : Signature) (R : List Rule) where
                         → VarsR H (sub σ J) x)
                    → ValidR H (sub σ J)
   apply-fact-valid {Ps} {J} v σ wσ {H} ps side γ gw hs =
-    transport Der (sym (sub-comp γ σ J)) (v (γ ∘ˢ σ) gwδ (sats Ps (λ m → m) (premisesR ps (λ x o → side x (inl o)) gw (λ x a → inr a) hs)))
+    transport Holds (sym (sub-comp γ σ J)) (v (γ ∘ˢ σ) gwδ (sats Ps (λ m → m) (premisesR ps (λ x o → side x (inl o)) gw (λ x a → inr a) hs)))
     where
       gwδ : GW (γ ∘ˢ σ) (VarsR (map plainR Ps) J)
       gwδ x o = ground-sub γ (σ x) (λ y oy → fst (gw y (side y (inr (x , o , oy)))))
@@ -195,12 +199,12 @@ module Implications (Sg : Signature) (R : List Rule) where
       plain-in (q ∷ qs) (here refl) o = here (inl o , λ ())
       plain-in (q ∷ qs) (there m)   o = there (plain-in qs m o)
 
-      sats : (qs : List Tm) → (∀ {q} → q ∈ qs → q ∈ Ps) → All (λ p → Der (sub γ (sub σ p))) qs
+      sats : (qs : List Tm) → (∀ {q} → q ∈ qs → q ∈ Ps) → All (λ p → Holds (sub γ (sub σ p))) qs
            → All (Sat (γ ∘ˢ σ)) (map plainR qs)
       sats []       inc []       = []
       sats (q ∷ qs) inc (d ∷ ds) =
         sat-plain (γ ∘ˢ σ) q (λ x o → gwδ x (inr (plain-in Ps (inc (here refl)) o)))
-                  (transport Der (sub-comp γ σ q) d)
+                  (transport Holds (sub-comp γ σ q) d)
         ∷ sats qs (λ m → inc (there m)) ds
 
   ----------------------------------------------------------------------
@@ -224,7 +228,7 @@ module Implications (Sg : Signature) (R : List Rule) where
   occs-plain (p ∷ ps) (tl o) = there (occs-plain ps o)
 
   sats-plain : (γ : Subst) (ps : List Tm) → (∀ x → Occs x ps → GroundWS (γ x) (vs x))
-             → All (Sat γ) (map plainR ps) → All (λ p → Der (sub γ p)) ps
+             → All (Sat γ) (map plainR ps) → All (λ p → Holds (sub γ p)) ps
   sats-plain γ []       gw []       = []
   sats-plain γ (p ∷ ps) gw (s ∷ ss) =
     plain-sat γ p (λ x o → gw x (hd o)) s ∷ sats-plain γ ps (λ x o → gw x (tl o)) ss
@@ -255,7 +259,7 @@ module Implications (Sg : Signature) (R : List Rule) where
     Mv x = Occ x J ⊎ Occs x Ps
 
     P : Tm → Set
-    P t = ∀ γ → GW γ Mv → γ X ≡ t → All (λ p → Der (sub γ p)) Ps → Der (sub γ J)
+    P t = ∀ γ → GW γ Mv → γ X ≡ t → All (λ p → Holds (sub γ p)) Ps → Holds (sub γ J)
 
     Q : ℕ → Tm → Set
     Q y t = GroundWS t (vs y) × (vs y ≡ vs X → P t)
@@ -315,7 +319,7 @@ module Implications (Sg : Signature) (R : List Rule) where
       go var eq gr = ⊥-elim (gr _ here)
       go {node c ts} (node e w) eq gr γ gw γX prems with cases c (trans e eq)
       ... | semcaseR ys distinct sorts fresh hs allowed valid =
-            transport Der (same J (λ x o → inl o)) (valid γ′ gw′ (sats hs allowed))
+            transport Holds (same J (λ x o → inl o)) (valid γ′ gw′ (sats hs allowed))
         where
           ground-args : ∀ x → ¬ Occs x ts
           ground-args x o = gr x (arg o)
@@ -369,9 +373,9 @@ module Implications (Sg : Signature) (R : List Rule) where
               sat : {h : RHyp} → CaseHyp X Ps J c ys h → Sat γ′ h
               sat (premise {p} m) =
                 sat-plain γ′ (sub (point X N) p) (gw-point γ gw fresh qs N inN p (inP m))
-                  (transport Der (sym (same p (inP m))) (all-∈ prems m))
+                  (transport Holds (sym (same p (inP m))) (all-∈ prems m))
               sat (ih y m sy G disj) δ agree gwδ premsδ =
-                transport Der (sym (sub-comp δ (point X (var y)) J)) (claim δ′ gwδ′ δ′X premsδ′)
+                transport Holds (sym (sub-comp δ (point X (var y)) J)) (claim δ′ gwδ′ δ′X premsδ′)
                 where
                   q : Q y (γ′ y)
                   q = upd-in γ qs y m
@@ -398,13 +402,13 @@ module Implications (Sg : Signature) (R : List Rule) where
                   ... | yes refl = transport (GroundWS (δ y)) sy (gwδ y (ih-occ y G oX))
                   ... | no ne = gwδ x (ih-keep y G x ne o)
 
-                  premsδ′ : All (λ p → Der (sub δ′ p)) Ps
+                  premsδ′ : All (λ p → Holds (sub δ′ p)) Ps
                   premsδ′ = back Ps premsδ
                     where
-                      back : (ps : List Tm) → All (λ p → Der (sub δ p)) (map (sub (point X (var y))) ps)
-                           → All (λ p → Der (sub δ′ p)) ps
+                      back : (ps : List Tm) → All (λ p → Holds (sub δ p)) (map (sub (point X (var y))) ps)
+                           → All (λ p → Holds (sub δ′ p)) ps
                       back []       []       = []
-                      back (p ∷ ps) (d ∷ ds) = transport Der (sub-comp δ (point X (var y)) p) d ∷ back ps ds
+                      back (p ∷ ps) (d ∷ ds) = transport Holds (sub-comp δ (point X (var y)) p) d ∷ back ps ds
 
       gos : {ts : List Tm} {ss : List ℕ} → WSs ts ss → All₂ (λ t s → s ≡ vs X → Ground t → P t) ts ss
       gos []       = []
@@ -423,11 +427,11 @@ module Implications (Sg : Signature) (R : List Rule) where
   ----------------------------------------------------------------------
   -- Inversion
 
-  -- A derivable judgment is the conclusion of a rule instance.
-  der-inv : {t : Tm} → Der t
+  -- What holds is the conclusion of a rule instance (M's support).
+  der-inv : {t : Tm} → Holds t
           → Σ Rule (λ r → (r ∈ R) × Σ Subst (λ σ →
-              (∀ y → OccR y r → GroundWS (σ y) (rs r y)) × All (λ p → Der (sub σ p)) (prem r) × (t ≡ sub σ (concl r))))
-  der-inv (by m σ ok ps) = _ , m , σ , ok , ps , refl
+              (∀ y → OccR y r → GroundWS (σ y) (rs r y)) × All (λ p → Holds (sub σ p)) (prem r) × (t ≡ sub σ (concl r))))
+  der-inv = support
 
   -- θ is a most general unifier of s and t, and keeps sorts.
   IsMGU : Subst → Tm → Tm → Set
@@ -517,10 +521,10 @@ module Implications (Sg : Signature) (R : List Rule) where
       gw-h : ∀ x → Fixed (plainR h) x → GroundWS (γ x) (vs x)
       gw-h x f = gw x (inr (here f))
 
-      result : NoUnifier h (sub (ren rn) (concl r)) ⊎ InvCase h J C r rn → Der (sub γ J)
+      result : NoUnifier h (sub (ren rn) (concl r)) ⊎ InvCase h J C r rn → Holds (sub γ J)
       result (inl nu) = ⊥-elim (nu ρ unifies)
       result (inr (invcase θ (factor , wθ) noCapture hs allowed valid)) =
-        transport Der (trans (sub-comp ρ θ J) (trans (sym (sub-ext _ _ J (λ x _ → fact x))) (sub-ext _ _ J (λ x o → ρ-used x (inr (inl o))))))
+        transport Holds (trans (sub-comp ρ θ J) (trans (sym (sub-ext _ _ J (λ x _ → fact x))) (sub-ext _ _ J (λ x o → ρ-used x (inr (inl o))))))
           (valid ρ gwρ (sats hs allowed))
         where
           fact : ∀ x → ρ x ≡ sub ρ (θ x)
@@ -590,11 +594,11 @@ module Implications (Sg : Signature) (R : List Rule) where
               sat : {k : RHyp} → InvHyp θ rn r C k → Sat ρ k
               sat (premise {p} m) =
                 sat-plain ρ _ (λ x o → in-sub x _ (prem-dom m) o)
-                  (transport Der (trans (sym (ren-ρ p (λ y o → inl (occs-∈ (prem r) m o))))
+                  (transport Holds (trans (sym (ren-ρ p (λ y o → inl (occs-∈ (prem r) m o))))
                                         (trans (sub-ext _ _ (sub (ren rn) p) (λ x _ → fact x)) (sym (sub-comp ρ θ (sub (ren rn) p)))))
                              (all-∈ ps m))
               sat (context {c} mc) δ agree gwδ premsδ =
-                transport Der (sym (same (rconcl c) (λ z oz → inl oz))) (all-∈ sC mc δ′ agree′ gwδ′ prems′)
+                transport Holds (sym (same (rconcl c) (λ z oz → inl oz))) (all-∈ sC mc δ′ agree′ gwδ′ prems′)
                 where
                   δ′ : Subst
                   δ′ x = pick (x ∈? gen c) (δ x) (γ x)
@@ -649,12 +653,15 @@ module Implications (Sg : Signature) (R : List Rule) where
                       ... | p , mp , op = inr (occs-map⁺ (off θ c) (rprem c) mp (sub-occ (off θ c) p op keep))
                   ... | no n = gw z (inr (there (fixed-in z o n)))
 
-                  prems′ : All (λ p → Der (sub δ′ p)) (rprem c)
+                  prems′ : All (λ p → Holds (sub δ′ p)) (rprem c)
                   prems′ = back′ (rprem c) (λ m → m) premsδ
                     where
                       back′ : (qs : List Tm) → (∀ {q} → q ∈ qs → q ∈ rprem c)
-                            → All (λ p → Der (sub δ p)) (map (sub (off θ c)) qs) → All (λ p → Der (sub δ′ p)) qs
+                            → All (λ p → Holds (sub δ p)) (map (sub (off θ c)) qs) → All (λ p → Holds (sub δ′ p)) qs
                       back′ []       inc []       = []
                       back′ (q ∷ qs) inc (d ∷ ds) =
-                        transport Der (same q (λ z oz → inr (occs-∈ (rprem c) (inc (here refl)) oz))) d
+                        transport Holds (same q (λ z oz → inr (occs-∈ (rprem c) (inc (here refl)) oz))) d
                         ∷ back′ qs (λ m → inc (there m)) ds
+
+-- The calculus for derivability.
+module Implications (Sg : Signature) (R : List Rule) = ImplicationsIn Sg R (Rules.der-model Sg R)

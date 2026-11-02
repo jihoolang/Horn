@@ -19,6 +19,15 @@
 -- instance derivable. The file also shows that dropping the premise
 -- variable condition would be unsound, using a sort without ground terms.
 --
+-- Derivability is one model of the rules. `CalculusIn` proves the same in
+-- any model (`Rules.Model`): a set of ground judgments closed under the
+-- rules' well-sorted ground instances, each of whose members is the
+-- conclusion of one with members as premises. Induction is on sorts,
+-- whose ground terms do not depend on the model, and inversion needs only
+-- the second condition, so a certificate is valid in every model; reading
+-- a theory in a structure, the integers say, is giving one. `Calculus` is
+-- `CalculusIn` for derivability.
+--
 -- Module `Calculus.Algorithm` then models the checking algorithm itself, as
 -- Soundness.agda does for ground certificates: steps are checked in order,
 -- references are step indices, rule bindings are found by matching,
@@ -779,7 +788,7 @@ record Rule : Set where
     rs    : ℕ → ℕ
 open Rule
 
-module Calculus (Sg : Signature) (R : List Rule) where
+module Rules (Sg : Signature) (R : List Rule) where
   open Signature Sg
 
   -- Well-sorted terms, given the sorts `srt` of their variables: eigen-
@@ -827,6 +836,41 @@ module Calculus (Sg : Signature) (R : List Rule) where
     by : {r : Rule} → r ∈ R → (σ : Subst) → (∀ y → OccR y r → GroundWS (σ y) (rs r y))
        → All (λ p → Der (sub σ p)) (prem r) → Der (sub σ (concl r))
 
+  -- A model of the rules: a set of ground judgments closed under every
+  -- well-sorted ground rule instance (a pre-fixed point) whose every
+  -- member is the conclusion of one with members as premises (a post-fixed
+  -- point). Derivability is the least; Horn's forms are sound in every one,
+  -- since induction is on sorts, whose terms are fixed, and inversion needs
+  -- only `support`. Reading a theory in a structure (the integers, say)
+  -- is giving such a model.
+  record Model : Set₁ where
+    field
+      holds   : Tm → Set
+      closure : {r : Rule} → r ∈ R → (σ : Subst) → (∀ y → OccR y r → GroundWS (σ y) (rs r y))
+              → All (λ p → holds (sub σ p)) (prem r) → holds (sub σ (concl r))
+      support : {t : Tm} → holds t
+              → Σ Rule (λ r → (r ∈ R) × Σ Subst (λ σ →
+                  (∀ y → OccR y r → GroundWS (σ y) (rs r y)) × All (λ p → holds (sub σ p)) (prem r)
+                  × (t ≡ sub σ (concl r))))
+
+  der-model : Model
+  der-model = record
+    { holds   = Der
+    ; closure = by
+    ; support = λ { (by m σ ok ps) → _ , m , σ , ok , ps , refl }
+    }
+
+-- The calculus, sound in the model M.
+module CalculusIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
+  open Signature Sg
+  open Rules Sg R public
+  open Model M
+
+  -- What M makes true; with `der-model`, derivability.
+  Holds : Tm → Set
+  Holds = holds
+
+
   -- The variables of a fact.
   Vars : List Tm → Tm → ℕ → Set
   Vars H J x = Occ x J ⊎ Any (Occ x) H
@@ -836,7 +880,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
   GW γ V = ∀ x → V x → GroundWS (γ x) (vs x)
 
   Valid : List Tm → Tm → Set
-  Valid H J = ∀ γ → GW γ (Vars H J) → All (λ h → Der (sub γ h)) H → Der (sub γ J)
+  Valid H J = ∀ γ → GW γ (Vars H J) → All (λ h → Holds (sub γ h)) H → Holds (sub γ J)
 
   -- An induction hypothesis for case variables ys: J at one of them.
   IH : ℕ → Tm → List ℕ → Tm → Set
@@ -891,7 +935,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
                    (cases : (c : ℕ) → out c ≡ vs X → SemCase X J c) where
 
     P : Tm → Set
-    P t = ∀ γ → GW γ (λ x → Occ x J) → γ X ≡ t → Der (sub γ J)
+    P t = ∀ γ → GW γ (λ x → Occ x J) → γ X ≡ t → Holds (sub γ J)
 
     -- What the case variables are bound to: well-sorted ground terms, with
     -- the induction claim for those of X's sort.
@@ -920,7 +964,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
       go var eq gr = ⊥-elim (gr _ here)
       go {node c ts} (node e w) eq gr γ gw γX with cases c (trans e eq)
       ... | semcase ys distinct sorts fresh hs ihs valid =
-            transport Der same (valid γ′ gw′ (hyps hs ihs))
+            transport Holds same (valid γ′ gw′ (hyps hs ihs))
         where
           ground-args : ∀ x → ¬ Occs x ts
           ground-args x o = gr x (arg o)
@@ -962,10 +1006,10 @@ module Calculus (Sg : Signature) (R : List Rule) where
               ... | no _ = upd-out γ ys ts x (not-case fresh o)
 
           -- Each induction hypothesis holds at the smaller argument.
-          hyps : (hs : List Tm) → All (IH X J ys) hs → All (λ h → Der (sub γ′ h)) hs
+          hyps : (hs : List Tm) → All (IH X J ys) hs → All (λ h → Holds (sub γ′ h)) hs
           hyps []       []                               = []
           hyps (h ∷ hs) ((y , m , sy , refl) ∷ rest) =
-            transport Der (sym (sub-comp γ′ (point X (var y)) J)) (claim δ gwδ δX)
+            transport Holds (sym (sub-comp γ′ (point X (var y)) J)) (claim δ gwδ δX)
             ∷ hyps hs rest
             where
               q : Q y (γ′ y)
@@ -1005,7 +1049,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
 
   inst-valid : {J : Tm} → Valid [] J → (τ : Subst) → (∀ x → Occ x J → WS (τ x) (vs x))
              → Valid [] (sub τ J)
-  inst-valid {J} v τ wτ γ gw [] = transport Der (sym (sub-comp γ τ J)) (v (γ ∘ˢ τ) gw′ [])
+  inst-valid {J} v τ wτ γ gw [] = transport Holds (sym (sub-comp γ τ J)) (v (γ ∘ˢ τ) gw′ [])
     where
       gw′ : GW (γ ∘ˢ τ) (Vars [] J)
       gw′ x (inl o) =
@@ -1022,11 +1066,11 @@ module Calculus (Sg : Signature) (R : List Rule) where
   -- and hypotheses are among the fact's (the predicate V).
   premises : {θ γ : Subst} {ps H : List Tm} {V : ℕ → Set} → SemPrems θ ps H
            → (∀ x → Occs x (subs θ ps) → V x) → GW γ V → (∀ x → Any (Occ x) H → V x)
-           → All (λ h → Der (sub γ h)) H → All (λ p → Der (sub (γ ∘ˢ θ) p)) ps
+           → All (λ h → Holds (sub γ h)) H → All (λ p → Holds (sub (γ ∘ˢ θ) p)) ps
   premises [] side gw hv hs = []
   premises {θ} {γ} {p ∷ ps} (_∷_ {H = H} {H′} v rest) side gw hv hs with all-++ H hs
   ... | hs₁ , hs₂ =
-        transport Der (sub-comp γ θ p) (v γ gw₁ hs₁)
+        transport Holds (sub-comp γ θ p) (v γ gw₁ hs₁)
         ∷ premises rest (λ x o → side x (tl o)) gw (λ x a → hv x (any-++ʳ H a)) hs₂
     where
       gw₁ : GW γ (Vars H (sub θ p))
@@ -1038,7 +1082,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
              → (∀ x → Occs x (subs θ (prem r)) → Vars H (sub θ (concl r)) x)
              → Valid H (sub θ (concl r))
   step-valid {r} r∈R θ wθ {H} ps side γ gw hs =
-    transport Der (sym (sub-comp γ θ (concl r))) (by r∈R (γ ∘ˢ θ) ok (premises ps side gw (λ x a → inr a) hs))
+    transport Holds (sym (sub-comp γ θ (concl r))) (closure r∈R (γ ∘ˢ θ) ok (premises ps side gw (λ x a → inr a) hs))
     where
       -- Every variable of a rule variable's binding is a variable of the fact.
       allowed : ∀ y → OccR y r → ∀ x → Occ x (θ y) → Vars H (sub θ (concl r)) x
@@ -1065,10 +1109,10 @@ module Calculus (Sg : Signature) (R : List Rule) where
 
   -- Main theorem: every well-sorted ground instance of an accepted
   -- hypothesis-free judgment is derivable.
-  closed : {J : Tm} → Valid [] J → (γ : Subst) → GW γ (λ x → Occ x J) → Der (sub γ J)
+  closed : {J : Tm} → Valid [] J → (γ : Subst) → GW γ (λ x → Occ x J) → Holds (sub γ J)
   closed v γ gw = v γ (λ { x (inl o) → gw x o ; x (inr ()) }) []
 
-  soundness : {J : Tm} → [] ⊢ J → (γ : Subst) → GW γ (λ x → Occ x J) → Der (sub γ J)
+  soundness : {J : Tm} → [] ⊢ J → (γ : Subst) → GW γ (λ x → Occ x J) → Holds (sub γ J)
   soundness d = closed (sound d)
 
 
@@ -1703,7 +1747,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
     -- well-sorted ground instance of every goal is derivable.
     accepts-sound : (goals : List Tm) (forms : List Form) (results : List Ref)
                   → accepts goals forms results ≡ just tt
-                  → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals
+                  → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Holds (sub γ g)) goals
     accepts-sound goals forms results e with bind-inv (checkSteps leaf 0 forms) _ e
     ... | fs , e₁ , e₂ =
           all-map closed (goals-ok fs (allT-map fst (steps-ok leaf leaf 0 forms e₁)) goals results e₂)
@@ -1793,7 +1837,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
     acceptsCode goals c = certificateP c >>= λ r → accepts goals (fst (fst r)) (snd (fst r))
 
     acceptsCode-sound : (goals : List Tm) (c : Code) → acceptsCode goals c ≡ just tt
-                      → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals
+                      → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Holds (sub γ g)) goals
     acceptsCode-sound goals c e with bind-inv (certificateP c) _ e
     ... | ((forms , results) , _) , _ , e₁ = accepts-sound goals forms results e₁
 
@@ -2284,7 +2328,7 @@ module Calculus (Sg : Signature) (R : List Rule) where
 
         acceptsH-sound : (goals : List Tm) (forms : List FormH) (results : List RefH)
                        → acceptsH goals forms results ≡ just tt
-                       → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals
+                       → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Holds (sub γ g)) goals
         acceptsH-sound goals forms results e with bind-inv (checkStepsH leaf 0 forms) _ e
         ... | fs , e₁ , e₂ = all-map closed (goals-okH fs (steps-okH leaf leaf 0 forms e₁) goals results e₂)
 
@@ -2436,9 +2480,12 @@ module Calculus (Sg : Signature) (R : List Rule) where
     -- `acceptsCodeH goals c` to `just tt`, every well-sorted ground instance
     -- of every goal is derivable.
     acceptsCodeH-sound : (goals : List Tm) (c : Code) → acceptsCodeH goals c ≡ just tt
-                       → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals
+                       → All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Holds (sub γ g)) goals
     acceptsCodeH-sound goals c e with bind-inv (tableP c) _ e
     ... | (T , c′) , e₁ , e₂ = all-map closed (StreamSound.run-ok T (tableP-ok c e₁) goals c′ e₂)
+
+-- The calculus for derivability.
+module Calculus (Sg : Signature) (R : List Rule) = CalculusIn Sg R (Rules.der-model Sg R)
 
 ------------------------------------------------------------------------
 -- Signatures given by tables, as in certificates exported from the Rust

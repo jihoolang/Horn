@@ -284,7 +284,11 @@ See [FORMAT.md](docs/FORMAT.md) for the concrete input language and
 [TRUST.md](docs/TRUST.md) for the acceptance contract and replay invariants.
 The implementation has not been formally verified. Acceptance establishes
 derivability relative to the supplied rules; it does not establish that those
-rules correctly describe an intended mathematical theory.
+rules correctly describe an intended mathematical theory. For schematic
+certificates, [agda/Schematic.agda](agda/Schematic.agda) and
+[agda/Implication.agda](agda/Implication.agda) prove each form sound in every
+model of the rules (`Rules.Model`), not only derivability, so a theory whose
+rules hold in a structure is read there by giving that model.
 
 ## Development
 
