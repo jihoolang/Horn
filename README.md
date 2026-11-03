@@ -289,6 +289,10 @@ certificates, [agda/Schematic.agda](agda/Schematic.agda) and
 [agda/Implication.agda](agda/Implication.agda) prove each form sound in every
 model of the rules (`Rules.Model`), not only derivability, so a theory whose
 rules hold in a structure is read there by giving that model.
+[agda/ImplicationCheck.agda](agda/ImplicationCheck.agda) is a checker for
+every form, implications included, that Agda runs on an exported
+certificate, proved sound in every model; jihoo's proof that its linear
+checker is sound is checked that way.
 
 ## Development
 

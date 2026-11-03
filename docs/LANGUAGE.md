@@ -152,10 +152,10 @@ theory: `rule bad : le (succ n) n` makes false things provable.
 
 ## Limits
 
-- Certificates with implications are checked by `horn::schematic`, whose
-  rules are proved sound at the level of the calculus in
-  [agda/Implication.agda](../agda/Implication.agda), but the Agda export
-  does not support them yet; `--agda` fails for such a file.
+- Certificates with implications are checked by `horn::schematic`; their
+  Agda export is checked by
+  [agda/ImplicationCheck.agda](../agda/ImplicationCheck.agda), proved sound
+  in every model of the rules.
 - Case analysis is at most two levels deep, and hypothetical goals get a
   smaller search budget.
 - Induction is structural on one variable per proof, one level deep.

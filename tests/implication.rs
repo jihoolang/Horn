@@ -1,6 +1,6 @@
 //! Implicational goals, rule hypotheses, application, induction with
 //! generalized induction hypotheses, and inversion.
-use horn::schematic::check;
+use horn::schematic::{check, export_agda};
 
 const LE: &str = include_str!("../examples/le.horn");
 const GOALS: &str = include_str!("../examples/le-trans.goals");
@@ -149,4 +149,13 @@ fn a_rule_hypothesis_is_not_its_conclusion() {
         (result bad 5)";
     let e = check(theory, goals, proof.as_bytes()).unwrap_err();
     assert!(e.contains("step 3 is a rule hypothesis"), "{e}");
+}
+
+#[test]
+fn the_committed_agda_export_of_transitivity_is_current() {
+    // agda/ImplicationCheck.agda checks it, independently of this checker.
+    let mut out = Vec::new();
+    export_agda(LE, GOALS, TRANS.as_bytes(), "LeTransCertificate", &mut out).unwrap();
+    let agda = String::from_utf8(out).unwrap();
+    assert_eq!(agda, include_str!("../agda/LeTransCertificate.agda"));
 }

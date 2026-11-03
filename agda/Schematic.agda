@@ -377,10 +377,11 @@ _≟ℓ_ : (xs ys : List ℕ) → Dec (xs ≡ ys)
 []       ≟ℓ []       = yes refl
 []       ≟ℓ (y ∷ ys) = no (λ ())
 (x ∷ xs) ≟ℓ []       = no (λ ())
-(x ∷ xs) ≟ℓ (y ∷ ys) with x ≟ y | xs ≟ℓ ys
-... | yes refl | yes refl = yes refl
-... | no ne    | _        = no (λ { refl → ne refl })
-... | yes _    | no ne    = no (λ { refl → ne refl })
+(x ∷ xs) ≟ℓ (y ∷ ys) with x ≟ y
+... | no ne = no (λ { refl → ne refl })
+... | yes e with xs ≟ℓ ys
+...   | yes es = yes (cong₂ _∷_ e es)
+...   | no ne  = no (λ { refl → ne refl })
 
 distinct? : (xs : List ℕ) → Dec (Distinct xs)
 distinct? []       = yes []
@@ -547,27 +548,32 @@ upd-map γ {ys = y ∷ ys} {ts = t ∷ ts} (n ∷ d) (q ∷ qs) = cong₂ _∷_ 
     tail = trans (map-ext _ _ ys skip) (upd-map γ d qs)
 
 ------------------------------------------------------------------------
--- Deciding term equality and occurrence
+-- Deciding term equality and occurrence. A `yes` carries its proof
+-- unevaluated: matching `yes refl` would make evaluation build the proof of
+-- every comparison of numbers, which takes as many steps as the numbers'
+-- size. Heads are compared before arguments.
 mutual
   _≟ₜ_ : (s t : Tm) → Dec (s ≡ t)
   var x     ≟ₜ var y with x ≟ y
-  ... | yes refl = yes refl
-  ... | no ne    = no (λ { refl → ne refl })
+  ... | yes e = yes (cong var e)
+  ... | no ne = no (λ { refl → ne refl })
   var x     ≟ₜ node g ts = no (λ ())
   node f ss ≟ₜ var y     = no (λ ())
-  node f ss ≟ₜ node g ts with f ≟ g | ss ≟ₜs ts
-  ... | yes refl | yes refl = yes refl
-  ... | no ne    | _        = no (λ { refl → ne refl })
-  ... | yes _    | no ne    = no (λ { refl → ne refl })
+  node f ss ≟ₜ node g ts with f ≟ g
+  ... | no ne = no (λ { refl → ne refl })
+  ... | yes e with ss ≟ₜs ts
+  ...   | yes es = yes (cong₂ node e es)
+  ...   | no ne  = no (λ { refl → ne refl })
 
   _≟ₜs_ : (ss ts : List Tm) → Dec (ss ≡ ts)
   []       ≟ₜs []       = yes refl
   []       ≟ₜs (t ∷ ts) = no (λ ())
   (s ∷ ss) ≟ₜs []       = no (λ ())
-  (s ∷ ss) ≟ₜs (t ∷ ts) with s ≟ₜ t | ss ≟ₜs ts
-  ... | yes refl | yes refl = yes refl
-  ... | no ne    | _        = no (λ { refl → ne refl })
-  ... | yes _    | no ne    = no (λ { refl → ne refl })
+  (s ∷ ss) ≟ₜs (t ∷ ts) with s ≟ₜ t
+  ... | no ne = no (λ { refl → ne refl })
+  ... | yes e with ss ≟ₜs ts
+  ...   | yes es = yes (cong₂ _∷_ e es)
+  ...   | no ne  = no (λ { refl → ne refl })
 
 -- The variables of a term, as a list.
 mutual
@@ -860,10 +866,230 @@ module Rules (Sg : Signature) (R : List Rule) where
     ; support = λ { (by m σ ok ps) → _ , m , σ , ok , ps , refl }
     }
 
+-- Matching and the checks of the algorithmic models. They do not depend
+-- on a model, so a checker built from them evaluates the same way
+-- whichever model its soundness is then stated in.
+module Matching (Sg : Signature) (R : List Rule) where
+  open Signature Sg
+  open Rules Sg R
+
+  mutual
+    wsv? : (srt : ℕ → ℕ) (t : Tm) (s : ℕ) → Dec (WSv srt t s)
+    wsv? srt (var x) s with srt x ≟ s
+    ... | yes e = yes (transport (WSv srt (var x)) e var)
+    ... | no ne = no (λ { var → ne refl })
+    wsv? srt (node f ts) s with out f ≟ s | wssv? srt ts (ins f)
+    ... | yes e | yes w = yes (node e w)
+    ... | no ne | _     = no (λ { (node e _) → ne e })
+    ... | yes _ | no nw = no (λ { (node _ w) → nw w })
+
+    wssv? : (srt : ℕ → ℕ) (ts : List Tm) (ss : List ℕ) → Dec (WSsv srt ts ss)
+    wssv? srt []       []       = yes []
+    wssv? srt []       (s ∷ ss) = no (λ ())
+    wssv? srt (t ∷ ts) []       = no (λ ())
+    wssv? srt (t ∷ ts) (s ∷ ss) with wsv? srt t s | wssv? srt ts ss
+    ... | yes w | yes ws = yes (w ∷ ws)
+    ... | no nw | _      = no (λ { (w ∷ _) → nw w })
+    ... | yes _ | no nws = no (λ { (_ ∷ ws) → nws ws })
+
+  ws? : (t : Tm) (s : ℕ) → Dec (WS t s)
+  ws? = wsv? vs
+
+  -- Partial assignments of rule variables.
+  Env : Set
+  Env = ℕ → Maybe Tm
+
+  empty : Env
+  empty _ = nothing
+
+  _[_↦_] : Env → ℕ → Tm → Env
+  (b [ x ↦ t ]) y = pick (x ≟ y) (just t) (b y)
+
+  record _⊑_ (b c : Env) : Set where
+    constructor keeps
+    field
+      kept : ∀ {x t} → b x ≡ just t → c x ≡ just t
+  open _⊑_
+
+  ⊑-refl : {b : Env} → b ⊑ b
+  ⊑-refl = keeps (λ e → e)
+
+  ⊑-trans : {a b c : Env} → a ⊑ b → b ⊑ c → a ⊑ c
+  ⊑-trans p q = keeps (λ e → kept q (kept p e))
+
+  upd-same : (b : Env) (x : ℕ) (t : Tm) → (b [ x ↦ t ]) x ≡ just t
+  upd-same b x t with x ≟ x
+  ... | yes _ = refl
+  ... | no ne = ⊥-elim (ne refl)
+
+  upd-ext : (b : Env) (x : ℕ) (t : Tm) → b x ≡ nothing → b ⊑ (b [ x ↦ t ])
+  upd-ext b x t free = keeps lemma
+    where
+      lemma : ∀ {y s} → b y ≡ just s → (b [ x ↦ t ]) y ≡ just s
+      lemma {y} e with x ≟ y
+      ... | yes refl = ⊥-elim (nothing≢just (trans (sym free) e))
+      ... | no _     = e
+
+  mutual
+    instE : Env → Tm → Maybe Tm
+    instE b (var x)     = b x
+    instE b (node f ps) = instsE b ps >>= λ ts → just (node f ts)
+
+    instsE : Env → List Tm → Maybe (List Tm)
+    instsE b []       = just []
+    instsE b (p ∷ ps) = instE b p >>= λ t → instsE b ps >>= λ ts → just (t ∷ ts)
+
+  cons-ok : {c : Env} (p : Tm) (ps : List Tm) {t : Tm} {ts : List Tm}
+          → instE c p ≡ just t → instsE c ps ≡ just ts → instsE c (p ∷ ps) ≡ just (t ∷ ts)
+  cons-ok p ps e₁ e₂ rewrite e₁ | e₂ = refl
+
+  node-ok : {c : Env} (f : ℕ) (ps : List Tm) {ts : List Tm}
+          → instsE c ps ≡ just ts → instE c (node f ps) ≡ just (node f ts)
+  node-ok f ps e rewrite e = refl
+
+  mutual
+    inst-mono : {b c : Env} → b ⊑ c → (p : Tm) {t : Tm} → instE b p ≡ just t → instE c p ≡ just t
+    inst-mono ext (var x) e = kept ext e
+    inst-mono {b} ext (node f ps) e with bind-inv (instsE b ps) (λ ts → just (node f ts)) e
+    ... | ts , e₁ , refl = node-ok f ps (insts-mono ext ps e₁)
+
+    insts-mono : {b c : Env} → b ⊑ c → (ps : List Tm) {ts : List Tm}
+               → instsE b ps ≡ just ts → instsE c ps ≡ just ts
+    insts-mono ext [] e = e
+    insts-mono {b} ext (p ∷ ps) e
+      with bind-inv (instE b p) (λ t → instsE b ps >>= λ ts → just (t ∷ ts)) e
+    ... | t , e₁ , e₂ with bind-inv (instsE b ps) (λ ts → just (t ∷ ts)) e₂
+    ...   | ts , e₃ , refl = cons-ok p ps (inst-mono ext p e₁) (insts-mono ext ps e₃)
+
+  fromMaybe : Maybe Tm → Tm
+  fromMaybe nothing  = var 0
+  fromMaybe (just t) = t
+
+  total : Env → Subst
+  total b x = fromMaybe (b x)
+
+  mutual
+    inst-subst : (b : Env) (p : Tm) {t : Tm} → instE b p ≡ just t → sub (total b) p ≡ t
+    inst-subst b (var x) e = cong fromMaybe e
+    inst-subst b (node f ps) e with bind-inv (instsE b ps) (λ ts → just (node f ts)) e
+    ... | ts , e₁ , refl = cong (node f) (insts-subst b ps e₁)
+
+    insts-subst : (b : Env) (ps : List Tm) {ts : List Tm} → instsE b ps ≡ just ts → subs (total b) ps ≡ ts
+    insts-subst b [] refl = refl
+    insts-subst b (p ∷ ps) e
+      with bind-inv (instE b p) (λ t → instsE b ps >>= λ ts → just (t ∷ ts)) e
+    ... | t , e₁ , e₂ with bind-inv (instsE b ps) (λ ts → just (t ∷ ts)) e₂
+    ...   | ts , e₃ , refl = cong₂ _∷_ (inst-subst b p e₁) (insts-subst b ps e₃)
+
+  bindVar : ℕ → Tm → Env → Maybe Tm → Maybe Env
+  bindVar x t b nothing  = just (b [ x ↦ t ])
+  bindVar x t b (just u) = when (u ≟ₜ t) b
+
+  -- Rule patterns against open terms: an eigenvariable is matched only by
+  -- a rule variable.
+  mutual
+    match : Tm → Tm → Env → Maybe Env
+    match (var x)     t           b = bindVar x t b (b x)
+    match (node f ps) (var e)     b = nothing
+    match (node f ps) (node g ts) b = when (f ≟ g) b >>= matchs ps ts
+
+    matchs : List Tm → List Tm → Env → Maybe Env
+    matchs []       []       b = just b
+    matchs (p ∷ ps) (t ∷ ts) b = match p t b >>= matchs ps ts
+    matchs []       (t ∷ ts) b = nothing
+    matchs (p ∷ ps) []       b = nothing
+
+  bindVar-ok : (x : ℕ) (t : Tm) (b : Env) (m : Maybe Tm) {c : Env}
+             → b x ≡ m → bindVar x t b m ≡ just c → (b ⊑ c) × (c x ≡ just t)
+  bindVar-ok x t b nothing  bx refl = upd-ext b x t bx , upd-same b x t
+  bindVar-ok x t b (just u) bx eq with when-inv (u ≟ₜ t) eq
+  ... | u≡t , refl = ⊑-refl , trans bx (cong just u≡t)
+
+  mutual
+    match-ok : (p t : Tm) (b : Env) {c : Env} → match p t b ≡ just c → (b ⊑ c) × (instE c p ≡ just t)
+    match-ok (var x) t b eq with bindVar-ok x t b (b x) refl eq
+    ... | ext , e = ext , e
+    match-ok (node f ps) (var e) b ()
+    match-ok (node f ps) (node g ts) b eq with bind-inv (when (f ≟ g) b) (matchs ps ts) eq
+    ... | b′ , e₁ , e₂ with when-inv (f ≟ g) e₁
+    ...   | refl , refl with matchs-ok ps ts b e₂
+    ...     | ext , e = ext , node-ok f ps e
+
+    matchs-ok : (ps ts : List Tm) (b : Env) {c : Env} → matchs ps ts b ≡ just c
+              → (b ⊑ c) × (instsE c ps ≡ just ts)
+    matchs-ok [] [] b refl = ⊑-refl , refl
+    matchs-ok (p ∷ ps) (t ∷ ts) b eq with bind-inv (match p t b) (matchs ps ts) eq
+    ... | c₁ , e₁ , e₂ with match-ok p t b e₁ | matchs-ok ps ts c₁ e₂
+    ...   | ext₁ , ok₁ | ext₂ , ok₂ = ⊑-trans ext₁ ext₂ , cons-ok p ps (inst-mono ext₂ p ok₁) ok₂
+    matchs-ok []       (t ∷ ts) b ()
+    matchs-ok (p ∷ ps) []       b ()
+
+
+
+  IsNode : Tm → Set
+  IsNode (var _)    = ⊥
+  IsNode (node _ _) = ⊤
+
+  headSort : Tm → ℕ
+  headSort (var x)    = vs x
+  headSort (node f _) = out f
+
+  -- A rule is well-formed when its premises and conclusion are judgments,
+  -- well-sorted for the sorts of its variables. The kernel's theory parser
+  -- checks this.
+  PatWF : Rule → Tm → Set
+  PatWF r p = IsNode p × WSv (rs r) p (headSort p)
+
+  RuleWF : Rule → Set
+  RuleWF r = All (PatWF r) (prem r) × PatWF r (concl r)
+
+  isNode? : (p : Tm) → Dec (IsNode p)
+  isNode? (var _)    = no (λ ())
+  isNode? (node _ _) = yes tt
+
+  patWF? : (r : Rule) (p : Tm) → Dec (PatWF r p)
+  patWF? r p = isNode? p ×? wsv? (rs r) p (headSort p)
+
+  ruleWF? : (r : Rule) → Dec (RuleWF r)
+  ruleWF? r = all? (patWF? r) (prem r) ×? patWF? r (concl r)
+
+  -- An explicit binding must be fresh and of the variable's sort.
+  bindFresh : Rule → ℕ → Tm → Env → Maybe Tm → Maybe Env
+  bindFresh r x t b nothing  = when (ws? t (rs r x)) (b [ x ↦ t ])
+  bindFresh r x t b (just _) = nothing
+
+  bindAll : Rule → List (ℕ × Tm) → Env → Maybe Env
+  bindAll r []             b = just b
+  bindAll r ((x , t) ∷ bs) b = bindFresh r x t b (b x) >>= bindAll r bs
+
+  conclude : Tm → Maybe Tm → Env → Maybe Env
+  conclude p nothing  b = just b
+  conclude p (just j) b = match p j b
+
+  answer : Maybe Tm → Maybe Tm → Maybe Tm
+  answer (just j) m = just j
+  answer nothing  m = m
+
+
+  -- Elements of xs not in ys.
+  filterOut : List ℕ → List ℕ → List ℕ
+  filterOut []       ys = []
+  filterOut (x ∷ xs) ys = pick (x ∈? ys) (filterOut xs ys) (x ∷ filterOut xs ys)
+
+  concatMap : (ℕ → List ℕ) → List ℕ → List ℕ
+  concatMap f []       = []
+  concatMap f (y ∷ ys) = f y ++ concatMap f ys
+
+  -- Rule variables only in the conclusion, and only in the premises.
+  conclOnly premOnly : Rule → List ℕ
+  conclOnly r = filterOut (vars (concl r)) (varss (prem r))
+  premOnly  r = filterOut (varss (prem r)) (vars (concl r))
+
 -- The calculus, sound in the model M.
 module CalculusIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
   open Signature Sg
   open Rules Sg R public
+  open Matching Sg R public
   open Model M
 
   -- What M makes true; with `der-model`, derivability.
@@ -1117,189 +1343,9 @@ module CalculusIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
 
 
   ----------------------------------------------------------------------
-  -- The checking algorithm. Rule bindings are found by matching, as in
-  -- Soundness.agda; references are step indices; hypotheses are carried as
-  -- judgments.
-
-  mutual
-    wsv? : (srt : ℕ → ℕ) (t : Tm) (s : ℕ) → Dec (WSv srt t s)
-    wsv? srt (var x) s with srt x ≟ s
-    ... | yes refl = yes var
-    ... | no ne    = no (λ { var → ne refl })
-    wsv? srt (node f ts) s with out f ≟ s | wssv? srt ts (ins f)
-    ... | yes e | yes w = yes (node e w)
-    ... | no ne | _     = no (λ { (node e _) → ne e })
-    ... | yes _ | no nw = no (λ { (node _ w) → nw w })
-
-    wssv? : (srt : ℕ → ℕ) (ts : List Tm) (ss : List ℕ) → Dec (WSsv srt ts ss)
-    wssv? srt []       []       = yes []
-    wssv? srt []       (s ∷ ss) = no (λ ())
-    wssv? srt (t ∷ ts) []       = no (λ ())
-    wssv? srt (t ∷ ts) (s ∷ ss) with wsv? srt t s | wssv? srt ts ss
-    ... | yes w | yes ws = yes (w ∷ ws)
-    ... | no nw | _      = no (λ { (w ∷ _) → nw w })
-    ... | yes _ | no nws = no (λ { (_ ∷ ws) → nws ws })
-
-  ws? : (t : Tm) (s : ℕ) → Dec (WS t s)
-  ws? = wsv? vs
-
-  -- Partial assignments of rule variables.
-  Env : Set
-  Env = ℕ → Maybe Tm
-
-  empty : Env
-  empty _ = nothing
-
-  _[_↦_] : Env → ℕ → Tm → Env
-  (b [ x ↦ t ]) y = pick (x ≟ y) (just t) (b y)
-
-  record _⊑_ (b c : Env) : Set where
-    constructor keeps
-    field
-      kept : ∀ {x t} → b x ≡ just t → c x ≡ just t
-  open _⊑_
-
-  ⊑-refl : {b : Env} → b ⊑ b
-  ⊑-refl = keeps (λ e → e)
-
-  ⊑-trans : {a b c : Env} → a ⊑ b → b ⊑ c → a ⊑ c
-  ⊑-trans p q = keeps (λ e → kept q (kept p e))
-
-  upd-same : (b : Env) (x : ℕ) (t : Tm) → (b [ x ↦ t ]) x ≡ just t
-  upd-same b x t with x ≟ x
-  ... | yes _ = refl
-  ... | no ne = ⊥-elim (ne refl)
-
-  upd-ext : (b : Env) (x : ℕ) (t : Tm) → b x ≡ nothing → b ⊑ (b [ x ↦ t ])
-  upd-ext b x t free = keeps lemma
-    where
-      lemma : ∀ {y s} → b y ≡ just s → (b [ x ↦ t ]) y ≡ just s
-      lemma {y} e with x ≟ y
-      ... | yes refl = ⊥-elim (nothing≢just (trans (sym free) e))
-      ... | no _     = e
-
-  mutual
-    instE : Env → Tm → Maybe Tm
-    instE b (var x)     = b x
-    instE b (node f ps) = instsE b ps >>= λ ts → just (node f ts)
-
-    instsE : Env → List Tm → Maybe (List Tm)
-    instsE b []       = just []
-    instsE b (p ∷ ps) = instE b p >>= λ t → instsE b ps >>= λ ts → just (t ∷ ts)
-
-  cons-ok : {c : Env} (p : Tm) (ps : List Tm) {t : Tm} {ts : List Tm}
-          → instE c p ≡ just t → instsE c ps ≡ just ts → instsE c (p ∷ ps) ≡ just (t ∷ ts)
-  cons-ok p ps e₁ e₂ rewrite e₁ | e₂ = refl
-
-  node-ok : {c : Env} (f : ℕ) (ps : List Tm) {ts : List Tm}
-          → instsE c ps ≡ just ts → instE c (node f ps) ≡ just (node f ts)
-  node-ok f ps e rewrite e = refl
-
-  mutual
-    inst-mono : {b c : Env} → b ⊑ c → (p : Tm) {t : Tm} → instE b p ≡ just t → instE c p ≡ just t
-    inst-mono ext (var x) e = kept ext e
-    inst-mono {b} ext (node f ps) e with bind-inv (instsE b ps) (λ ts → just (node f ts)) e
-    ... | ts , e₁ , refl = node-ok f ps (insts-mono ext ps e₁)
-
-    insts-mono : {b c : Env} → b ⊑ c → (ps : List Tm) {ts : List Tm}
-               → instsE b ps ≡ just ts → instsE c ps ≡ just ts
-    insts-mono ext [] e = e
-    insts-mono {b} ext (p ∷ ps) e
-      with bind-inv (instE b p) (λ t → instsE b ps >>= λ ts → just (t ∷ ts)) e
-    ... | t , e₁ , e₂ with bind-inv (instsE b ps) (λ ts → just (t ∷ ts)) e₂
-    ...   | ts , e₃ , refl = cons-ok p ps (inst-mono ext p e₁) (insts-mono ext ps e₃)
-
-  fromMaybe : Maybe Tm → Tm
-  fromMaybe nothing  = var 0
-  fromMaybe (just t) = t
-
-  total : Env → Subst
-  total b x = fromMaybe (b x)
-
-  mutual
-    inst-subst : (b : Env) (p : Tm) {t : Tm} → instE b p ≡ just t → sub (total b) p ≡ t
-    inst-subst b (var x) e = cong fromMaybe e
-    inst-subst b (node f ps) e with bind-inv (instsE b ps) (λ ts → just (node f ts)) e
-    ... | ts , e₁ , refl = cong (node f) (insts-subst b ps e₁)
-
-    insts-subst : (b : Env) (ps : List Tm) {ts : List Tm} → instsE b ps ≡ just ts → subs (total b) ps ≡ ts
-    insts-subst b [] refl = refl
-    insts-subst b (p ∷ ps) e
-      with bind-inv (instE b p) (λ t → instsE b ps >>= λ ts → just (t ∷ ts)) e
-    ... | t , e₁ , e₂ with bind-inv (instsE b ps) (λ ts → just (t ∷ ts)) e₂
-    ...   | ts , e₃ , refl = cong₂ _∷_ (inst-subst b p e₁) (insts-subst b ps e₃)
-
-  bindVar : ℕ → Tm → Env → Maybe Tm → Maybe Env
-  bindVar x t b nothing  = just (b [ x ↦ t ])
-  bindVar x t b (just u) = when (u ≟ₜ t) b
-
-  -- Rule patterns against open terms: an eigenvariable is matched only by
-  -- a rule variable.
-  mutual
-    match : Tm → Tm → Env → Maybe Env
-    match (var x)     t           b = bindVar x t b (b x)
-    match (node f ps) (var e)     b = nothing
-    match (node f ps) (node g ts) b = when (f ≟ g) b >>= matchs ps ts
-
-    matchs : List Tm → List Tm → Env → Maybe Env
-    matchs []       []       b = just b
-    matchs (p ∷ ps) (t ∷ ts) b = match p t b >>= matchs ps ts
-    matchs []       (t ∷ ts) b = nothing
-    matchs (p ∷ ps) []       b = nothing
-
-  bindVar-ok : (x : ℕ) (t : Tm) (b : Env) (m : Maybe Tm) {c : Env}
-             → b x ≡ m → bindVar x t b m ≡ just c → (b ⊑ c) × (c x ≡ just t)
-  bindVar-ok x t b nothing  bx refl = upd-ext b x t bx , upd-same b x t
-  bindVar-ok x t b (just u) bx eq with when-inv (u ≟ₜ t) eq
-  ... | u≡t , refl = ⊑-refl , trans bx (cong just u≡t)
-
-  mutual
-    match-ok : (p t : Tm) (b : Env) {c : Env} → match p t b ≡ just c → (b ⊑ c) × (instE c p ≡ just t)
-    match-ok (var x) t b eq with bindVar-ok x t b (b x) refl eq
-    ... | ext , e = ext , e
-    match-ok (node f ps) (var e) b ()
-    match-ok (node f ps) (node g ts) b eq with bind-inv (when (f ≟ g) b) (matchs ps ts) eq
-    ... | b′ , e₁ , e₂ with when-inv (f ≟ g) e₁
-    ...   | refl , refl with matchs-ok ps ts b e₂
-    ...     | ext , e = ext , node-ok f ps e
-
-    matchs-ok : (ps ts : List Tm) (b : Env) {c : Env} → matchs ps ts b ≡ just c
-              → (b ⊑ c) × (instsE c ps ≡ just ts)
-    matchs-ok [] [] b refl = ⊑-refl , refl
-    matchs-ok (p ∷ ps) (t ∷ ts) b eq with bind-inv (match p t b) (matchs ps ts) eq
-    ... | c₁ , e₁ , e₂ with match-ok p t b e₁ | matchs-ok ps ts c₁ e₂
-    ...   | ext₁ , ok₁ | ext₂ , ok₂ = ⊑-trans ext₁ ext₂ , cons-ok p ps (inst-mono ext₂ p ok₁) ok₂
-    matchs-ok []       (t ∷ ts) b ()
-    matchs-ok (p ∷ ps) []       b ()
-
-
-
-  IsNode : Tm → Set
-  IsNode (var _)    = ⊥
-  IsNode (node _ _) = ⊤
-
-  headSort : Tm → ℕ
-  headSort (var x)    = vs x
-  headSort (node f _) = out f
-
-  -- A rule is well-formed when its premises and conclusion are judgments,
-  -- well-sorted for the sorts of its variables. The kernel's theory parser
-  -- checks this.
-  PatWF : Rule → Tm → Set
-  PatWF r p = IsNode p × WSv (rs r) p (headSort p)
-
-  RuleWF : Rule → Set
-  RuleWF r = All (PatWF r) (prem r) × PatWF r (concl r)
-
-  isNode? : (p : Tm) → Dec (IsNode p)
-  isNode? (var _)    = no (λ ())
-  isNode? (node _ _) = yes tt
-
-  patWF? : (r : Rule) (p : Tm) → Dec (PatWF r p)
-  patWF? r p = isNode? p ×? wsv? (rs r) p (headSort p)
-
-  ruleWF? : (r : Rule) → Dec (RuleWF r)
-  ruleWF? r = all? (patWF? r) (prem r) ×? patWF? r (concl r)
+  -- The checking algorithm. Rule bindings are found by matching (module
+  -- `Matching`), as in Soundness.agda; references are step indices;
+  -- hypotheses are carried as judgments.
 
   -- `ctors s` lists the constructors of sort s; the checker relies on it
   -- naming every one for the sorts of eigenvariables (in Rust it is built
@@ -1367,46 +1413,15 @@ module CalculusIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
     ... | f , e₁ , e₂ with bind-inv (resolveAll fs rs) (λ qs → just (f ∷ qs)) e₂
     ...   | qs , e₃ , refl = resolve-ok fs vf r e₁ ∷ resolveAll-ok fs vf rs e₃
 
-    -- An explicit binding must be fresh and of the variable's sort.
-    bindFresh : Rule → ℕ → Tm → Env → Maybe Tm → Maybe Env
-    bindFresh r x t b nothing  = when (ws? t (rs r x)) (b [ x ↦ t ])
-    bindFresh r x t b (just _) = nothing
-
-    bindAll : Rule → List (ℕ × Tm) → Env → Maybe Env
-    bindAll r []             b = just b
-    bindAll r ((x , t) ∷ bs) b = bindFresh r x t b (b x) >>= bindAll r bs
-
     premisesMatch : List Tm → List Fact → Env → Maybe Env
     premisesMatch []       []       b = just b
     premisesMatch (p ∷ ps) (f ∷ qs) b = match p (snd f) b >>= premisesMatch ps qs
     premisesMatch []       (f ∷ qs) b = nothing
     premisesMatch (p ∷ ps) []       b = nothing
 
-    conclude : Tm → Maybe Tm → Env → Maybe Env
-    conclude p nothing  b = just b
-    conclude p (just j) b = match p j b
-
-    answer : Maybe Tm → Maybe Tm → Maybe Tm
-    answer (just j) m = just j
-    answer nothing  m = m
-
     hypsOf : List Fact → List Tm
     hypsOf []       = []
     hypsOf (f ∷ qs) = fst f ++ hypsOf qs
-
-    -- Elements of xs not in ys.
-    filterOut : List ℕ → List ℕ → List ℕ
-    filterOut []       ys = []
-    filterOut (x ∷ xs) ys = pick (x ∈? ys) (filterOut xs ys) (x ∷ filterOut xs ys)
-
-    concatMap : (ℕ → List ℕ) → List ℕ → List ℕ
-    concatMap f []       = []
-    concatMap f (y ∷ ys) = f y ++ concatMap f ys
-
-    -- Rule variables only in the conclusion, and only in the premises.
-    conclOnly premOnly : Rule → List ℕ
-    conclOnly r = filterOut (vars (concl r)) (varss (prem r))
-    premOnly  r = filterOut (varss (prem r)) (vars (concl r))
 
     -- Bindings of variables that only the conclusion has are well-sorted;
     -- the others are parts of well-sorted facts. The variables of a premise
@@ -1854,8 +1869,8 @@ module CalculusIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
     nothing ≟ₘ just _  = no (λ ())
     just _  ≟ₘ nothing = no (λ ())
     just a  ≟ₘ just b with a ≟ b
-    ... | yes refl = yes refl
-    ... | no ne    = no (λ { refl → ne refl })
+    ... | yes e = yes (cong just e)
+    ... | no ne = no (λ { refl → ne refl })
 
     -- An entry whose cached sort is the sort of its term.
     SortOk : Entry → Set

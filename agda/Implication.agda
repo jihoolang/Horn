@@ -34,6 +34,36 @@ open import Schematic
 open Rule
 open Σ
 
+------------------------------------------------------------------------
+-- Rule hypotheses. They do not depend on a model, so a checker that
+-- carries them evaluates the same way in whichever model its soundness
+-- is stated.
+
+record RHyp : Set where
+  constructor rhyp
+  field
+    rprem  : List Tm
+    rconcl : Tm
+    gen    : List ℕ
+open RHyp
+
+plainR : Tm → RHyp
+plainR j = rhyp [] j []
+
+OccH : RHyp → ℕ → Set
+OccH h x = Occ x (rconcl h) ⊎ Occs x (rprem h)
+
+-- The variables a hypothesis fixes: all but the generalized ones.
+Fixed : RHyp → ℕ → Set
+Fixed h x = OccH h x × ¬ (x ∈ gen h)
+
+-- θ applied to a hypothesis, off its generalized variables.
+off : Subst → RHyp → Subst
+off θ c x = pick (x ∈? gen c) (var x) (θ x)
+
+appθ : Subst → RHyp → RHyp
+appθ θ c = rhyp (map (sub (off θ c)) (rprem c)) (sub (off θ c) (rconcl c)) (gen c)
+
 -- Sound in the model M; `Implications` below is derivability.
 module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) where
   open Signature Sg
@@ -41,25 +71,7 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
   open Model M
 
   ----------------------------------------------------------------------
-  -- Rule hypotheses and their semantics
-
-  record RHyp : Set where
-    constructor rhyp
-    field
-      rprem  : List Tm
-      rconcl : Tm
-      gen    : List ℕ
-  open RHyp
-
-  plainR : Tm → RHyp
-  plainR j = rhyp [] j []
-
-  OccH : RHyp → ℕ → Set
-  OccH h x = Occ x (rconcl h) ⊎ Occs x (rprem h)
-
-  -- The variables a hypothesis fixes: all but the generalized ones.
-  Fixed : RHyp → ℕ → Set
-  Fixed h x = OccH h x × ¬ (x ∈ gen h)
+  -- The semantics of rule hypotheses
 
   -- γ satisfies a rule hypothesis when every instance agreeing with γ
   -- off the generalized variables derives the conclusion from the premises.
@@ -440,13 +452,6 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
   NoUnifier : Tm → Tm → Set
   NoUnifier s t = ∀ ρ → ¬ (sub ρ s ≡ sub ρ t)
 
-  -- θ applied to a hypothesis, off its generalized variables.
-  off : Subst → RHyp → Subst
-  off θ c x = pick (x ∈? gen c) (var x) (θ x)
-
-  appθ : Subst → RHyp → RHyp
-  appθ θ c = rhyp (map (sub (off θ c)) (rprem c)) (sub (off θ c) (rconcl c)) (gen c)
-
   -- Renaming a rule's variables apart: rn, with its inverse back.
   record Renaming (r : Rule) (Used : ℕ → Set) : Set where
     constructor mkRenaming
@@ -455,7 +460,6 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
       back    : ℕ → Maybe ℕ
       back-rn : ∀ y → OccR y r → back (rn y) ≡ just y
       rn-back : ∀ x y → back x ≡ just y → (x ≡ rn y) × OccR y r
-      sorted  : ∀ y → OccR y r → vs (rn y) ≡ rs r y
       fresh   : ∀ y → OccR y r → ¬ Used (rn y)
 
   ren : (ℕ → ℕ) → Subst
@@ -470,6 +474,8 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
   record InvCase (h J : Tm) (C : List RHyp) (r : Rule) (rn : ℕ → ℕ) : Set where
     constructor invcase
     field
+      -- Only a rule that can conclude h needs its variables' sorts kept.
+      sorted    : ∀ y → OccR y r → vs (rn y) ≡ rs r y
       θ         : Subst
       mgu       : IsMGU θ h (sub (ren rn) (concl r))
       noCapture : ∀ c → c ∈ C → ∀ x → Fixed c x → ∀ g → g ∈ gen c → ¬ Occ g (θ x)
@@ -480,18 +486,24 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
   Used : Tm → Tm → List RHyp → ℕ → Set
   Used h J C x = Occ x h ⊎ Occ x J ⊎ Any (λ c → OccH c x) C
 
-  -- For every rule: renamed apart, either it cannot conclude h, or a case.
-  record RuleCase (h J : Tm) (C : List RHyp) (r : Rule) : Set where
-    constructor rulecase
-    field
-      renamed : Renaming r (Used h J C)
-      outcome : NoUnifier h (sub (ren (Renaming.rn renamed)) (concl r))
-              ⊎ InvCase h J C r (Renaming.rn renamed)
+  -- For every rule: its conclusion has another head symbol, or, renamed
+  -- apart, it cannot conclude h, or a case.
+  data RuleCase (h J : Tm) (C : List RHyp) (r : Rule) : Set where
+    clash    : {f g : ℕ} {ts us : List Tm} → h ≡ node f ts → concl r ≡ node g us → ¬ (f ≡ g)
+             → RuleCase h J C r
+    rulecase : (renamed : Renaming r (Used h J C))
+             → NoUnifier h (sub (ren (Renaming.rn renamed)) (concl r))
+               ⊎ InvCase h J C r (Renaming.rn renamed)
+             → RuleCase h J C r
 
   invert-valid : (h J : Tm) (C : List RHyp) → (∀ r → r ∈ R → RuleCase h J C r) → ValidR (plainR h ∷ C) J
   invert-valid h J C cases γ gw (sh ∷ sC) with der-inv (plain-sat γ h (λ x o → gw x (inr (here (inl o , λ ())))) sh)
   ... | r , m , σ , ok , ps , eq with cases r m
-  ... | rulecase (mkRenaming rn back back-rn rn-back sorted fresh) outcome = result outcome
+  ... | clash refl e ne = ⊥-elim (ne (heads (trans eq (cong (sub σ) e))))
+    where
+      heads : {f g : ℕ} {ts us : List Tm} → node f ts ≡ node g us → f ≡ g
+      heads refl = refl
+  ... | rulecase (mkRenaming rn back back-rn rn-back fresh) outcome = result outcome
     where
       choose : Maybe ℕ → ℕ → Tm
       choose (just y) x = σ y
@@ -523,7 +535,7 @@ module ImplicationsIn (Sg : Signature) (R : List Rule) (M : Rules.Model Sg R) wh
 
       result : NoUnifier h (sub (ren rn) (concl r)) ⊎ InvCase h J C r rn → Holds (sub γ J)
       result (inl nu) = ⊥-elim (nu ρ unifies)
-      result (inr (invcase θ (factor , wθ) noCapture hs allowed valid)) =
+      result (inr (invcase sorted θ (factor , wθ) noCapture hs allowed valid)) =
         transport Holds (trans (sub-comp ρ θ J) (trans (sym (sub-ext _ _ J (λ x _ → fact x))) (sub-ext _ _ J (λ x o → ρ-used x (inr (inl o))))))
           (valid ρ gwρ (sats hs allowed))
         where

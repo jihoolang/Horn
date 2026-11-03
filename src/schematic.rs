@@ -287,13 +287,15 @@ fn process(theory: &str, goals: &str, proof: impl BufRead, out: Mode) -> Result<
             let xs = f.list().map(|xs| (xs[0].atom().unwrap_or(""), xs.len()));
             matches!(xs, Ok(("apply" | "invert", _) | ("hyp", 5) | ("induct", 6)))
         });
-    if implicational && !matches!(out, Mode::Check) {
-        return Err(
-            "implications are not yet supported by the Agda export or by instantiation".into(),
-        );
+    if implicational && matches!(out, Mode::Instantiate(..)) {
+        return Err("implications are not yet supported by instantiation".into());
     }
     if let Mode::Agda(module, w) = out {
-        export(&mut ck, &forms, &goal_list, &results, module, w)?;
+        if implicational {
+            export_implication(&mut ck, &forms, &goal_list, &goal_hyps, &results, module, w)?;
+        } else {
+            export(&mut ck, &forms, &goal_list, &results, module, w)?;
+        }
     } else if let Mode::Instantiate(bindings, goals_out, proof_out) = out {
         let mut sigma = HashMap::new();
         for (v, t) in bindings {
@@ -1269,6 +1271,14 @@ struct Encoder<'c, 's> {
 }
 
 impl Encoder<'_, '_> {
+    /// The table of terms, then the forms and results.
+    fn code(&self) -> Vec<u32> {
+        let mut code = vec![self.index.len() as u32];
+        code.extend(&self.table);
+        code.extend(&self.body);
+        code
+    }
+
     fn term(&mut self, id: u32) -> u32 {
         if let Some(&i) = self.index.get(&id) {
             return i;
@@ -1384,6 +1394,250 @@ impl Encoder<'_, '_> {
     }
 }
 
+/// Step indices, sorted and without repeats, as the checker keeps them.
+fn step_indices(x: &Sexp) -> Result<Vec<u32>> {
+    let mut out = Vec::new();
+    for i in x.list()? {
+        out.push(
+            i.atom()?
+                .parse::<u32>()
+                .map_err(|_| "expected a step index")?,
+        );
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The encoding agda/ImplicationCheck.agda decodes: the same table of
+/// terms, and every form of a schematic certificate.
+impl Encoder<'_, '_> {
+    fn var_id(&self, x: &Sexp) -> Result<u32> {
+        Ok(self.ck.var(x)? - self.ck.spec.names.len() as u32)
+    }
+
+    fn list_of(&mut self, xs: &[u32]) {
+        self.body.push(xs.len() as u32);
+        self.body.extend(xs);
+    }
+
+    fn binds(&mut self, x: &Sexp) -> Result<()> {
+        let bs = x.list()?;
+        self.body.push(bs.len() as u32);
+        for b in bs {
+            let ys = b.list()?;
+            let v = self.var_id(&ys[0])?;
+            let t = self.ck.term(&ys[1], None)?;
+            self.body.push(v);
+            self.put_term(t);
+        }
+        Ok(())
+    }
+
+    fn reference_impl(&mut self, x: &Sexp) -> Result<()> {
+        let index = |x: &Sexp| -> Result<u32> {
+            x.atom()?
+                .parse()
+                .map_err(|_| "expected a step index".into())
+        };
+        match x {
+            Sexp::Atom(_) => self.body.extend([0, index(x)?]),
+            Sexp::List(xs) => {
+                self.body.extend([1, index(&xs[0])?]);
+                self.binds(&Sexp::List(xs[1..].to_vec()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refs_impl(&mut self, x: &Sexp) -> Result<()> {
+        let refs = x.list()?;
+        self.body.push(refs.len() as u32);
+        for r in refs {
+            self.reference_impl(r)?;
+        }
+        Ok(())
+    }
+
+    fn form_impl(&mut self, k: usize, form: &Sexp) -> Result<()> {
+        let spec = self.ck.spec;
+        let xs = form.list()?;
+        let index = |x: &Sexp| -> Result<u32> {
+            x.atom()?
+                .parse()
+                .map_err(|_| "expected a step index".into())
+        };
+        match (xs[0].atom()?, xs.len()) {
+            ("hyp", 3) => {
+                let j = self.ck.judgment(&xs[2])?;
+                self.body.extend([0, 0]);
+                self.put_term(j);
+                self.body.push(0);
+            }
+            ("hyp", _) => {
+                let ps = self.ck.judgments(&xs[2])?;
+                let j = self.ck.judgment(&xs[3])?;
+                self.body.extend([0, ps.len() as u32]);
+                for p in ps {
+                    self.put_term(p);
+                }
+                self.put_term(j);
+                let mut g = Vec::new();
+                for v in xs[4].list()? {
+                    g.push(self.var_id(v)?);
+                }
+                self.list_of(&g);
+            }
+            ("step", _) => {
+                let r = spec.rule(xs[2].atom()?)?;
+                let rule = &spec.rules[r as usize];
+                self.body.extend([1, r]);
+                self.refs_impl(&xs[3])?;
+                let mut binds = Vec::new();
+                for item in &xs[4..] {
+                    let ys = item.list()?;
+                    let head = ys[0].atom()?;
+                    if head.starts_with('?') && ys.len() == 2 {
+                        let i = rule.vars.iter().position(|(v, _)| v == head);
+                        let i = i.ok_or("unknown variable")? as u32;
+                        binds.push((i, self.ck.term(&ys[1], None)?));
+                    }
+                }
+                self.body.push(binds.len() as u32);
+                for (i, t) in binds {
+                    self.body.push(i);
+                    self.put_term(t);
+                }
+                // The conclusion, as the checker found it.
+                let j = self.ck.facts[k].judgment;
+                self.body.push(1);
+                self.put_term(j);
+            }
+            ("apply", _) => {
+                self.body.extend([2, index(&xs[2])?]);
+                self.binds(&xs[3])?;
+                self.refs_impl(&xs[4])?;
+            }
+            ("induct", n) => {
+                let x = self.var_id(&xs[2])?;
+                let hs = if n == 6 {
+                    step_indices(&xs[3])?
+                } else {
+                    Vec::new()
+                };
+                let j = self.ck.judgment(&xs[n - 2])?;
+                self.body.extend([3, x]);
+                self.list_of(&hs);
+                self.put_term(j);
+                let cases = xs[n - 1].list()?;
+                self.body.push(cases.len() as u32);
+                for case in cases {
+                    let ys = case.list()?;
+                    self.body.push(index(&ys[0])?);
+                    let mut vs = Vec::new();
+                    for y in &ys[1..] {
+                        vs.push(self.var_id(y)?);
+                    }
+                    self.list_of(&vs);
+                }
+            }
+            ("invert", _) => {
+                let ctx = step_indices(&xs[3])?;
+                let j = self.ck.judgment(&xs[4])?;
+                self.body.extend([4, index(&xs[2])?]);
+                self.list_of(&ctx);
+                self.put_term(j);
+                let cases = xs[5].list()?;
+                self.body.push(cases.len() as u32);
+                for case in cases {
+                    let ys = case.list()?;
+                    self.body
+                        .extend([spec.rule(ys[0].atom()?)?, index(&ys[1])?]);
+                    let mut vs = Vec::new();
+                    for y in ys[2].list()? {
+                        vs.push(self.var_id(y)?);
+                    }
+                    self.list_of(&vs);
+                }
+            }
+            (tag, _) => return Err(format!("cannot export form {tag}")),
+        }
+        Ok(())
+    }
+}
+
+/// Writes an implicational certificate for agda/ImplicationCheck.agda,
+/// whose checker is proved sound in every model of the rules.
+fn export_implication(
+    ck: &mut Checker,
+    forms: &[Sexp],
+    goals: &[(String, u32)],
+    goal_hyps: &HashMap<String, Vec<u32>>,
+    results: &[(String, Sexp)],
+    module: &str,
+    w: &mut dyn Write,
+) -> Result<()> {
+    let tables = tables(ck, true);
+    let mut enc = Encoder {
+        ck,
+        index: HashMap::new(),
+        table: Vec::new(),
+        body: Vec::new(),
+    };
+    enc.body.push(forms.len() as u32);
+    for (k, form) in forms.iter().enumerate() {
+        enc.form_impl(k, form)?;
+    }
+    for (name, _) in goals {
+        let r = results
+            .iter()
+            .find(|(n, _)| n == name)
+            .ok_or("missing result")?;
+        enc.reference_impl(&r.1)?;
+    }
+    let code = enc.code();
+    let ck = &*enc.ck;
+    let mut ag = Agda {
+        ck,
+        names: HashMap::new(),
+        defs: String::new(),
+    };
+    let goal_terms: Vec<String> = goals
+        .iter()
+        .map(|(name, j)| {
+            let hs: Vec<String> = goal_hyps
+                .get(name)
+                .map(|hs| hs.iter().map(|&h| ag.term(h)).collect())
+                .unwrap_or_default();
+            format!("({} , {})", list(&hs), ag.term(*j))
+        })
+        .collect();
+
+    let mut s = String::new();
+    let _ = writeln!(s, "{{-# OPTIONS --safe --without-K #-}}");
+    let _ = writeln!(s, "-- Generated by `schematic-kernel --agda`; do not edit.");
+    let _ = writeln!(
+        s,
+        "module {module} where\n\nopen import Schematic\nopen import Implication\nopen import ImplicationCheck\n"
+    );
+    s.push_str(&tables);
+    let _ = writeln!(s, "open Check sig rules ctors\n");
+    s.push_str(&ag.defs);
+    let _ = writeln!(s, "goals : List Goal\ngoals = {}\n", list(&goal_terms));
+    write_code(&mut s, &code);
+    let _ = writeln!(
+        s,
+        "-- Agda decodes the certificate and runs the checker on it, once.\n\
+         accepted : accepts goals code ≡ just tt\n\
+         accepted = refl\n\n\
+         -- Each goal's hypotheses imply its judgment in every model of the rules.\n\
+         theorem : (M : Rules.Model sig rules) → All (Meaning.ValidGoal sig rules M) goals\n\
+         theorem M = Sound.accepts-sound sig rules M (witness (all? ruleWF? rules) tt) ctors\n\
+         \x20 (complete-from (witness junk? tt)) goals code accepted"
+    );
+    w.write_all(s.as_bytes()).map_err(|e| e.to_string())
+}
+
 fn list(items: &[String]) -> String {
     let mut s = String::new();
     for i in items {
@@ -1412,6 +1666,80 @@ fn export(
     module: &str,
     w: &mut dyn Write,
 ) -> Result<()> {
+    let tables = theory_tables(ck);
+    let mut enc = Encoder {
+        ck,
+        index: HashMap::new(),
+        table: Vec::new(),
+        body: Vec::new(),
+    };
+    enc.body.push(forms.len() as u32);
+    for (k, form) in forms.iter().enumerate() {
+        enc.form(k, form)?;
+    }
+    enc.body.push(goals.len() as u32);
+    for (name, _) in goals {
+        let r = results
+            .iter()
+            .find(|(n, _)| n == name)
+            .ok_or("missing result")?;
+        enc.reference(&r.1)?;
+    }
+    let code = enc.code();
+    let ck = &*enc.ck;
+    let mut ag = Agda {
+        ck,
+        names: HashMap::new(),
+        defs: String::new(),
+    };
+    let goal_terms: Vec<String> = goals.iter().map(|&(_, j)| ag.term(j)).collect();
+
+    let mut s = String::new();
+    let _ = writeln!(s, "{{-# OPTIONS --safe --without-K #-}}");
+    let _ = writeln!(s, "-- Generated by `schematic-kernel --agda`; do not edit.");
+    let _ = writeln!(s, "module {module} where\n\nopen import Schematic\n");
+    s.push_str(&tables);
+    let _ = writeln!(
+        s,
+        "open Algorithm (witness (all? ruleWF? rules) tt) ctors (complete-from (witness junk? tt))\n"
+    );
+    s.push_str(&ag.defs);
+    let _ = writeln!(s, "goals : List Tm\ngoals = {}\n", list(&goal_terms));
+    write_code(&mut s, &code);
+    // Passing `refl` directly makes Agda run the checker once; a separate
+    // lemma would be evaluated again when applied.
+    let _ = writeln!(
+        s,
+        "-- Every well-sorted ground instance of every goal is derivable. Agda\n\
+         -- checks `refl : acceptsCodeH goals code ≡ just tt` here by decoding\n\
+         -- the certificate and running the modelled checker on it.\n\
+         theorem : All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals\n\
+         theorem = acceptsCodeH-sound goals code refl"
+    );
+    w.write_all(s.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The theory as the tables `Tables` in agda/Schematic.agda reads, and the
+/// line opening it.
+fn theory_tables(ck: &Checker) -> String {
+    tables(ck, false)
+}
+
+/// A Braun tree of the values, as agda/Schematic.agda's `lookupT` reads
+/// one: element 0 at the root, odd positions on the left, even ones on
+/// the right.
+fn braun(xs: &[String]) -> String {
+    if xs.is_empty() {
+        return "leaf".into();
+    }
+    let odd: Vec<String> = xs[1..].iter().step_by(2).cloned().collect();
+    let even: Vec<String> = xs[1..].iter().skip(1).step_by(2).cloned().collect();
+    format!("(bin {} {} {})", xs[0], braun(&odd), braun(&even))
+}
+
+/// The tables with the variables' sorts in a tree, for `TreeTables` in
+/// agda/ImplicationCheck.agda, and the line opening them.
+fn tables(ck: &Checker, tree: bool) -> String {
     let spec = ck.spec;
     let nsorts = spec.sorts.len() as u32;
     let nsym = spec.names.len() as u32;
@@ -1450,52 +1778,30 @@ fn export(
             )
         })
         .collect();
-    let mut enc = Encoder {
-        ck,
-        index: HashMap::new(),
-        table: Vec::new(),
-        body: Vec::new(),
-    };
-    enc.body.push(forms.len() as u32);
-    for (k, form) in forms.iter().enumerate() {
-        enc.form(k, form)?;
-    }
-    enc.body.push(goals.len() as u32);
-    for (name, _) in goals {
-        let r = results
-            .iter()
-            .find(|(n, _)| n == name)
-            .ok_or("missing result")?;
-        enc.reference(&r.1)?;
-    }
-    let mut code = vec![enc.index.len() as u32];
-    code.extend(&enc.table);
-    code.extend(&enc.body);
-    let ck = &*enc.ck;
-    let mut ag = Agda {
-        ck,
-        names: HashMap::new(),
-        defs: String::new(),
-    };
-    let goal_terms: Vec<String> = goals.iter().map(|&(_, j)| ag.term(j)).collect();
-
     let mut s = String::new();
-    let _ = writeln!(s, "{{-# OPTIONS --safe --without-K #-}}");
-    let _ = writeln!(s, "-- Generated by `schematic-kernel --agda`; do not edit.");
-    let _ = writeln!(s, "module {module} where\n\nopen import Schematic\n");
     let _ = writeln!(s, "outT : List ℕ\noutT = {}\n", list(&out_t));
     let _ = writeln!(s, "insT : List (List ℕ)\ninsT = {}\n", list(&ins_t));
-    let _ = writeln!(s, "varT : List ℕ\nvarT = {}\n", list(&var_t));
+    if tree {
+        let _ = writeln!(s, "varT : Tree ℕ\nvarT = {}\n", braun(&var_t));
+    } else {
+        let _ = writeln!(s, "varT : List ℕ\nvarT = {}\n", list(&var_t));
+    }
     let _ = writeln!(s, "rules : List Rule\nrules = {}\n", list(&rules));
-    let _ = writeln!(s, "open Tables outT insT varT {} rules", nsorts + nsym);
+    // An implicational certificate's signature is public, for a theorem
+    // to state what it proves in.
+    let tables = if tree { "TreeTables" } else { "Tables" };
+    let public = if tree { " public" } else { "" };
     let _ = writeln!(
         s,
-        "open Algorithm (witness (all? ruleWF? rules) tt) ctors (complete-from (witness junk? tt))\n"
+        "open {tables} outT insT varT {} rules{public}",
+        nsorts + nsym
     );
-    s.push_str(&ag.defs);
-    let _ = writeln!(s, "goals : List Tm\ngoals = {}\n", list(&goal_terms));
-    // The certificate as numbers, a thousand to a literal: Agda elaborates
-    // a long literal far more cheaply than as many list cells.
+    s
+}
+
+/// The certificate as numbers, a thousand to a literal: Agda elaborates a
+/// long literal far more cheaply than as many list cells.
+fn write_code(s: &mut String, code: &[u32]) {
     let mut chunks = Vec::new();
     for (i, chunk) in code.chunks(1000).enumerate() {
         // Base-2³² digits, most significant first in the hexadecimal literal.
@@ -1515,15 +1821,4 @@ fn export(
         chunks.push(format!("code{i}"));
     }
     let _ = writeln!(s, "code : Code\ncode = {} ⊕ ε\n", chunks.join(" ⊕ "));
-    // Passing `refl` directly makes Agda run the checker once; a separate
-    // lemma would be evaluated again when applied.
-    let _ = writeln!(
-        s,
-        "-- Every well-sorted ground instance of every goal is derivable. Agda\n\
-         -- checks `refl : acceptsCodeH goals code ≡ just tt` here by decoding\n\
-         -- the certificate and running the modelled checker on it.\n\
-         theorem : All (λ g → ∀ γ → GW γ (λ x → Occ x g) → Der (sub γ g)) goals\n\
-         theorem = acceptsCodeH-sound goals code refl"
-    );
-    w.write_all(s.as_bytes()).map_err(|e| e.to_string())
 }

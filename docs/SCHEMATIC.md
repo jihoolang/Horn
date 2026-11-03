@@ -255,9 +255,42 @@ outcome a checker rejects. For any fuel:
 
 Checked examples fix the order on the unifier of `le_trans`'s first
 inversion: the Agda algorithm computes the same `B := s N, P := M` as the
-Rust checker. The export of implicational certificates to the Agda checker
-is not done yet; with this proof, its `invert` can call `mgu` instead of
-taking the unifier on trust.
+Rust checker.
+
+[agda/ImplicationCheck.agda](../agda/ImplicationCheck.agda) turns these
+lemmas into a checker Agda runs. `Check` makes the checks of
+`src/schematic.rs` for every form, implications included, on a
+certificate given as numbers; its `invert` calls `mgu`, renames a rule
+apart with the case's variables (or, for a rule given no case, with
+variables it picks itself and must see fail to unify), and checks that the
+unifier captures no generalized variable. `Sound.accepts-sound` proves:
+
+    accepts goals code ≡ just tt → All ValidGoal goals
+
+in every model of the rules, where a goal `(H , J)` is valid when every
+well-sorted ground instance that makes H hold makes J hold. The checker
+depends on the signature and rules only, never on the model, so Agda runs
+it once (`refl`) and the theorem then holds in any model: derivability, or
+a structure such as the integers. Its differences from the Rust checker
+only reject more: hypotheses are kept as (step, hypothesis) pairs and two
+of a step are merged only when equal; a case variable must not be
+generalized by an induction hypothesis the case uses; unification takes
+fuel. `Transfer` moves a model and a valid goal between signatures that
+agree on the symbols and on the goal's variables, since ground terms have
+the same sorts under both; a certificate's signature declares every
+variable it uses, a theorem's only the goal's.
+
+`schematic-kernel --agda` writes an implicational certificate for this
+checker. [agda/LeTransCertificate.agda](../agda/LeTransCertificate.agda)
+is `le_trans`; `nix flake check` checks it, a test keeps it in sync with
+the Rust output, and Agda must reject it for the goal without its second
+hypothesis. jihoo's proof that its linear checker is sound (36,631 steps,
+4,226 variables) checks in 86 s and 2.3 GB. Two things made that possible,
+from 23 minutes: the variables' sorts are in a Braun tree (`TreeTables`),
+and the decisions of term and number equality return `yes` with their
+proof unevaluated. Matching `yes refl` makes evaluation build the proof of
+every comparison of naturals, which takes as many steps as the numbers'
+size; certificate variables number in the thousands.
 
 ### Checking Rust output with the Agda model
 

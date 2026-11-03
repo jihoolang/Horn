@@ -45,8 +45,8 @@ single x u y with y ≟ x
 mutual
   occ? : (x : ℕ) (t : Tm) → Dec (Occ x t)
   occ? x (var y) with x ≟ y
-  ... | yes refl = yes here
-  ... | no ne    = no (λ o → ne (occ-var o))
+  ... | yes e = yes (transport (λ z → Occ x (var z)) e here)
+  ... | no ne = no (λ o → ne (occ-var o))
   occ? x (node f ts) with occs? x ts
   ... | yes o = yes (arg o)
   ... | no nu = no (λ { (arg o) → nu o })
