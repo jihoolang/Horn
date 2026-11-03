@@ -1,7 +1,7 @@
 {
   description = "Horn: a small checker for many-sorted Horn derivation certificates";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/b6018f87da91d19d0ab4cf979885689b469cdd41";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/e7439b6b14ad3cc35d05608ebca9bce01a25f5f8";
 
   outputs = { self, nixpkgs }:
     let

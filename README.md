@@ -12,7 +12,7 @@ certificates from scripts in a small cubical language.
 
 ## Try it
 
-Requires Rust 1.88 or newer; there are no external crate dependencies.
+Requires Rust 1.95 or newer; there are no external crate dependencies.
 
 ```sh
 cargo run --release --locked --offline --bin horn -- \
@@ -221,7 +221,7 @@ checked. See [BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Run
 
-Requires Rust 1.88 or newer. There are no external crate dependencies.
+Requires Rust 1.95 or newer. There are no external crate dependencies.
 
 ```sh
 cargo run --release --locked --offline --bin kernel -- \
