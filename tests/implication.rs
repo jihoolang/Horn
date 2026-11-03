@@ -130,3 +130,23 @@ fn a_proved_implication_applies_as_a_rule() {
     );
     check(LE, &goals, proof.as_bytes()).unwrap();
 }
+
+#[test]
+fn a_rule_hypothesis_is_not_its_conclusion() {
+    // h holds of successors, j of nothing, so h A → j A is false at s z.
+    // In the successor case the induction hypothesis h Y ⊢ j Y must be
+    // applied, proving h Y; referenced as a premise it would give j Y alone.
+    let theory = "(sort N) (ctor z () N) (ctor s (N) N) (pred h (N)) (pred j (N))
+        (rule h.s () (h (s ?n))) (rule j.s ((j ?n)) (j (s ?n)))";
+    let goals = "(var A N) (goal bad ((h A)) (j A))";
+    let proof = "(var Y N)
+        (hyp 0 (h A))
+        (hyp 1 (h z))
+        (invert 2 1 () (j z) ())
+        (hyp 3 ((h Y)) (j Y) ())
+        (step 4 j.s (3) (j (s Y)))
+        (induct 5 A (0) (j A) ((2) (4 Y)))
+        (result bad 5)";
+    let e = check(theory, goals, proof.as_bytes()).unwrap_err();
+    assert!(e.contains("step 3 is a rule hypothesis"), "{e}");
+}

@@ -12,8 +12,9 @@
 //! REF    = INDEX | (INDEX (VAR TERM)...)
 //! ```
 //!
-//! A step's premise references are REFs: an earlier step, or an instance of
-//! a hypothesis-free earlier step under a substitution of its variables.
+//! A step's premise references are REFs: an earlier step other than a rule
+//! hypothesis (which only `apply` uses), or an instance of a hypothesis-free
+//! earlier step under a substitution of its variables.
 //! `result` also takes a REF. Goals may contain variables.
 //!
 //! Meaning. A step with judgment J and hypothesis steps H is valid when for
@@ -644,10 +645,13 @@ impl Checker<'_> {
         };
         match x {
             Sexp::Atom(_) => {
-                let f = self
-                    .facts
-                    .get(index(x)?)
-                    .ok_or("reference to a later step")?;
+                let n = index(x)?;
+                let f = self.facts.get(n).ok_or("reference to a later step")?;
+                // A rule hypothesis P ⊢ J gives J only through `apply`, which
+                // proves P; referencing it would assume J outright.
+                if f.is_hyp && !f.is_plain_hyp() {
+                    return Err(format!("step {n} is a rule hypothesis; apply it"));
+                }
                 Ok((f.judgment, f.hyps.clone()))
             }
             Sexp::List(xs) => {
